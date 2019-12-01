@@ -1,6 +1,6 @@
 #include <iostream>
 #include <armadillo>
-
+#include <cmath>
 #include "mpi.h"
 #include <stdio.h>
 
@@ -15,18 +15,37 @@ using namespace arma;
 int taskP; // p - processors count
 int taskN = 64; // n - number of cells
 int taskm = 8; // m - number of blocks
+// int taskN = 216;
+// int taskm = 27;
 int taskK = 1; // K - number of parameters
 int taskt = 1; // t - shadow area size
 
+void extendCubeToShadowArea(cube &cube) {
+  int extendedSize = cube.n_slices + taskt;
+  cube.insert_slices(0, taskt);
+  cube.insert_slices(cube.n_slices, taskt);
+  cube.resize(extendedSize + taskt, extendedSize + taskt, extendedSize + taskt);
+  for (uword k = 0; k < cube.n_slices; k++) {
+      mat cubeMat = cube.slice(k);
+      cubeMat.shed_rows(extendedSize, extendedSize + taskt - 1);
+      cubeMat.shed_cols(extendedSize, extendedSize + taskt - 1);
+      cubeMat.insert_cols(0, taskt);
+      cubeMat.insert_rows(0, taskt);
+      cube.slice(k) = cubeMat;
+  }
+}
+
 double* splitIntoSubcubes (cube basicCube, int numParts, int subCubeSize) {
+
   double* subCubes;
   int numPartsDimm = cbrt(numParts);
-  subCubes = (double *) malloc(numParts*subCubeSize*subCubeSize*subCubeSize*sizeof(double));
+  int side = subCubeSize;
+  subCubes = (double *) malloc(numParts*pow((side+taskt*2), 3)*sizeof(double));
   int num=0;
   for (int i=0; i < numPartsDimm; i++)
     for (int j=0; j < numPartsDimm; j++)
       for (int k=0; k < numPartsDimm; k++) {
-        cube subCube = basicCube.subcube( 0 + i*subCubeSize, 0 + j*subCubeSize, 0 + k*subCubeSize, subCubeSize - 1  + i * subCubeSize, subCubeSize - 1  + j * subCubeSize, subCubeSize - 1  + k * subCubeSize );
+        cube subCube = basicCube.subcube( 0 + i*subCubeSize, 0 + j*subCubeSize, 0 + k*subCubeSize, subCubeSize - 1  + i * subCubeSize + taskt*2, subCubeSize - 1  + j * subCubeSize + taskt*2, subCubeSize - 1  + k * subCubeSize + taskt*2);
         memcpy(subCubes + subCube.size() * num , subCube.begin(), subCube.size() * sizeof(double));
         num++;
   }
@@ -37,8 +56,7 @@ cube combineSubcubes(double* &arraySendCubes, int numParts, int subCubeSize, int
   int numPartsDimm = cbrt(numParts);
   vector<cube> subCubes;
   for (int i=0; i<numParts; i++) {
-    cube cube(subCubeSize, subCubeSize, subCubeSize);
-    memcpy(cube.begin() + i*nodeCellsNum, arraySendCubes + i*nodeCellsNum, nodeCellsNum * sizeof(double));
+    cube cube(arraySendCubes + i*nodeCellsNum, subCubeSize, subCubeSize, subCubeSize);
     subCubes.push_back(cube);
   }
   delete [] arraySendCubes;
@@ -75,12 +93,27 @@ cube combineSubcubes(double* &arraySendCubes, int numParts, int subCubeSize, int
 
 void updateParametetsValue(cube &cube, int subCubeSize) {
   int dimSize = cbrt(cube.size());
-  for (int i=0+taskt; i<dimSize; i++)
-    for (int j=0+taskt; j<dimSize; j++)
-      for (int k=0+taskt; k<dimSize; k++) {
-        // for (int m=1; m<=taskt; m++) cube(i,j,k) += cube(i-m,j,k) + cube(i+m,j,k) + cube(i,j-m,k) + cube(i,j+m,k) + cube(i,j,k-m) + cube(i,j,k+m);
-        // cube(i,j,k) = taskt*cube(i,j,k)*1/6;
+  for (int i=0+taskt; i<dimSize-taskt; i++)
+    for (int j=0+taskt; j<dimSize-taskt; j++)
+      for (int k=0+taskt; k<dimSize-taskt; k++) {
+        for (int m=1; m<=taskt; m++) cube(i,j,k) += cube(i-m,j,k) + cube(i+m,j,k) + cube(i,j-m,k) + cube(i,j+m,k) + cube(i,j,k-m) + cube(i,j,k+m);
+        cube(i,j,k) = cube(i,j,k)/(6*taskt);
       }
+}
+
+cube cropCubeBack(cube &nodeCube, int subCubeSize) {
+  nodeCube.shed_slices(subCubeSize+1, subCubeSize+1+taskt-1);
+  nodeCube.shed_slices(0, taskt-1);
+  cube cube(subCubeSize, subCubeSize, subCubeSize);
+  for (uword i = 0; i < nodeCube.n_slices; i++) {
+      mat nodeCubeMat = nodeCube.slice(i);
+      nodeCubeMat.shed_cols(subCubeSize+1, subCubeSize+1+taskt-1);
+      nodeCubeMat.shed_cols(0, taskt-1);
+      nodeCubeMat.shed_rows(subCubeSize+1, subCubeSize+1+taskt-1);
+      nodeCubeMat.shed_rows(0, taskt-1);
+      cube.slice(i) = nodeCubeMat;
+  }
+  return cube;
 }
 
 int main(int argc, char *argv[]) {
@@ -97,35 +130,42 @@ int main(int argc, char *argv[]) {
   // Initialize the random generator
   arma_rng::set_seed_random();
 
-  int cellsNum = 64;
-  int numParts = 8;
-  int nodeCellsNum = cellsNum/numParts;
+  int cellsNum = taskN;
+  int numParts = taskm;
   int cubeSize = cbrt(cellsNum);
   int numPartsDimm = cbrt(numParts);
   int subCubeSize = cubeSize / numPartsDimm;
 
+  cube extendedNodeCube(subCubeSize+taskt*2, subCubeSize+taskt*2, subCubeSize+taskt*2);
   cube nodeCube(subCubeSize, subCubeSize, subCubeSize);
   cube basicCube(cubeSize, cubeSize, cubeSize);
   double* arraySendCubes;
+  double* arrayRecvCubes;
   vector<cube> subCubes;
 
   if (id == 0) {
-    int num = 0;
-    for (value:basicCube) {
-      value = num;
-      num++;
-    }
+    basicCube = randu<cube>(cubeSize, cubeSize, cubeSize);
+    extendCubeToShadowArea(basicCube);
     arraySendCubes = splitIntoSubcubes(basicCube, numParts, subCubeSize);
   }
-  MPI_Scatter( arraySendCubes, nodeCellsNum, MPI_DOUBLE, nodeCube.begin(), nodeCellsNum, MPI_DOUBLE, 0, comm );
+  MPI_Scatter( arraySendCubes, extendedNodeCube.size(), MPI_DOUBLE, extendedNodeCube.begin(), extendedNodeCube.size(), MPI_DOUBLE, 0, comm );
+  if (id==0) {
+    arrayRecvCubes = (double *) malloc(pow(cubeSize, 3)*sizeof(double));
+  }
 
-  updateParametetsValue(nodeCube, subCubeSize);
+  updateParametetsValue(extendedNodeCube, cubeSize);
 
-  MPI_Gather( nodeCube.begin(), nodeCellsNum, MPI_DOUBLE, arraySendCubes, nodeCellsNum, MPI_DOUBLE, 0, comm );
+  for (int i=0; i<100000; i++) {
+    updateParametetsValue(extendedNodeCube, cubeSize);
+  }
+
+  nodeCube = cropCubeBack(extendedNodeCube, subCubeSize);
+
+  MPI_Gather( nodeCube.begin(), nodeCube.size(), MPI_DOUBLE, arrayRecvCubes, nodeCube.size(), MPI_DOUBLE, 0, comm );
 
   if (id == 0) {
-    basicCube = combineSubcubes(arraySendCubes, numParts, subCubeSize, cubeSize, nodeCellsNum);
-
+    basicCube = randu<cube>(cubeSize, cubeSize, cubeSize);
+    basicCube = combineSubcubes(arrayRecvCubes, numParts, subCubeSize, cubeSize, nodeCube.size());
     cout << basicCube << endl;
   }
 
