@@ -3,9 +3,7 @@
 #include <cmath>
 #include "mpi.h"
 #include <stdio.h>
-
 #include <vector>
-
 #include <random>
 #include <ctime>
 
@@ -13,21 +11,20 @@ using namespace std;
 using namespace arma;
 
 int taskP; // p - processors count
-// int taskN = 64; // n - number of cells
-int taskN = 216;
+int taskN = 729000; // n - number of cells
 int taskm; // m - number of blocks
 int taskK = 1; // K - number of parameters
-int taskt = 1; // t - shadow area size
+int taskt = 15; // t - shadow area size
 
-double* splitIntoSubcubes (cube basicCube, int numParts, int internalCubeSide, int numPartsDimm) {
+double* splitIntoSubcubes (cube basicCube, int numParts, int internalCubeSide, int numPartsDimm, int nodeCubeNum) {
   double* subCubes;
-  subCubes = (double *) malloc(numParts*pow((internalCubeSide+taskt*2), 3)*sizeof(double));
-  int side = internalCubeSide/cbrt(numParts);
+  subCubes = (double *) malloc(numParts*nodeCubeNum*sizeof(double));
+  int side = internalCubeSide/round(cbrt(numParts));
   int num=0;
   for (int i=0; i < numPartsDimm; i++)
     for (int j=0; j < numPartsDimm; j++)
       for (int k=0; k < numPartsDimm; k++) {
-        cube subCube = basicCube.subcube( 0 + i*side, 0 + j*side, 0 + k*side, side - 1 + i * side + taskt*2, side - 1  + j * side + taskt*2, side - 1 + k * side + taskt*2);
+        cube subCube = basicCube.subcube( 0 + i*(side), 0 + j*(side), 0 + k*(side), side - 1 + i * (side) + taskt*2, side - 1 + j * (side) + taskt*2, side - 1 + k * (side) + taskt*2);
         memcpy(subCubes + subCube.size() * num , subCube.begin(), subCube.size() * sizeof(double));
         num++;
   }
@@ -74,58 +71,65 @@ cube combineSubcubes(double* &arrayCubes, int numParts, int numPartsDimm, int su
   return newCube;
 }
 
-void updateParametetsValue(cube &cube, int nodeCubeSide) {
-  int dimSize = cbrt(cube.size());
-  for (int i=0+taskt; i<dimSize-taskt; i++)
-    for (int j=0+taskt; j<dimSize-taskt; j++)
-      for (int k=0+taskt; k<dimSize-taskt; k++) {
+void updateParametetsValue(cube &cube, int nodeCubeSide, int dimSize) {
+  for (int i=taskt; i<dimSize-taskt; i++)
+    for (int j=taskt; j<dimSize-taskt; j++)
+      for (int k=taskt; k<dimSize-taskt; k++) {
         for (int m=1; m<=taskt; m++) cube(i,j,k) += cube(i-m,j,k) + cube(i+m,j,k) + cube(i,j-m,k) + cube(i,j+m,k) + cube(i,j,k-m) + cube(i,j,k+m);
         cube(i,j,k) = cube(i,j,k)/(6*taskt);
-        // cube(i,j,k) = 0;
       }
 }
 
-cube extractInternalPart(cube &nodeCube, int internalCubeSide) {
-
-  nodeCube.shed_slices(internalCubeSide+1, internalCubeSide+1+taskt-1);
+cube extractInternalPart(cube &nodeCube, int internalCubeSide, int id) {
   nodeCube.shed_slices(0, taskt-1);
+  nodeCube.shed_slices(internalCubeSide, internalCubeSide+taskt-1);
   cube cube(internalCubeSide, internalCubeSide, internalCubeSide);
   for (uword i = 0; i < nodeCube.n_slices; i++) {
       mat nodeCubeMat = nodeCube.slice(i);
-      nodeCubeMat.shed_cols(internalCubeSide+1, internalCubeSide+1+taskt-1);
       nodeCubeMat.shed_cols(0, taskt-1);
-      nodeCubeMat.shed_rows(internalCubeSide+1, internalCubeSide+1+taskt-1);
+      nodeCubeMat.shed_cols(internalCubeSide, internalCubeSide+taskt-1);
       nodeCubeMat.shed_rows(0, taskt-1);
+      nodeCubeMat.shed_rows(internalCubeSide, internalCubeSide+taskt-1);
       cube.slice(i) = nodeCubeMat;
   }
   return cube;
 }
 
 void updateInternalPart(cube &basicCube, cube &internalCube, int internalCubeSide) {
-
-  // TO-DO !
-
-  // internalCube.resize(internalCubeSide + taskt*2, internalCubeSide + taskt*2, internalCubeSide + taskt*2);
-  // for (uword k = taskt; k < internalCube.n_slices - taskt; k++) {
-  //     mat internalCubeMat = internalCube.slice(k);
-  //     internalCubeMat.shed_rows(internalCubeSide, internalCubeSide + taskt*2 - 1);
-  //     internalCubeMat.shed_cols(internalCubeSide, internalCubeSide + taskt*2 - 1);
-  //     mat basicCubeMat = cube.slice(k);
-  //     internalCubeMat.insert_cols(0, taskt);
-  //     internalCubeMat.insert_rows(0, taskt);
-  //     internalCubeMat.insert_cols(0, taskt);
-  //     internalCubeMat.insert_rows(0, taskt);
-  //     cube.slice(k) = cubeMat;
-  // }
-  // for (int i=0; i<taskt; i++) {
-  //   mat basicCubeSlice = basicCube.slice(i);
-  //   internalCube.insert_slices(0+i, basicCubeSlice);
-  // }
-  // for (int i=internalCubeSide; i<internalCubeSide+taskt; i++) {
-  //   mat basicCubeSlice = basicCube.slice(i);
-  //   internalCube.insert_slices(internalCubeSide, basicCubeSlice);
-  // }
-
+  internalCube.resize(internalCubeSide + taskt*2, internalCubeSide + taskt*2, internalCubeSide);
+  internalCube.insert_slices(0, taskt);
+  internalCube.insert_slices(taskt + internalCubeSide, taskt);
+  for (uword k = taskt; k < internalCube.n_slices - taskt; k++) {
+    mat internalCubeMat = internalCube.slice(k);
+    mat basicCubeMat = basicCube.slice(k);
+    internalCubeMat.shed_cols(internalCubeSide, internalCubeSide + taskt - 1);
+    internalCubeMat.insert_cols(0, taskt);
+    internalCubeMat.shed_rows(internalCubeSide, internalCubeSide + taskt*2 - 1);
+    mat topRows = basicCubeMat;
+    topRows.shed_rows(taskt, internalCubeSide + taskt*2 - 1);
+    mat bottomRows = basicCubeMat;
+    bottomRows.shed_rows(0, internalCubeSide + taskt - 1);
+    internalCubeMat.insert_rows(0, topRows);
+    internalCubeMat.insert_rows(internalCubeSide + taskt, bottomRows);
+    internalCubeMat.shed_cols(taskt + internalCubeSide, taskt + internalCubeSide + taskt - 1);
+    internalCubeMat.shed_cols(0, taskt-1);
+    mat leadColums = basicCubeMat;
+    leadColums.shed_cols(taskt, internalCubeSide + taskt*2 - 1);
+    mat tailColums = basicCubeMat;
+    tailColums.shed_cols(0, internalCubeSide + taskt - 1);
+    internalCubeMat.insert_cols(0, leadColums);
+    internalCubeMat.insert_cols(taskt + internalCubeSide, tailColums);
+    internalCube.slice(k) = internalCubeMat;
+  }
+  for (int i=0; i<taskt; i++) {
+    mat basicCubeSlice = basicCube.slice(i);
+    internalCube.slice(i) = basicCubeSlice;
+  }
+  for (int i=taskt+internalCubeSide; i<internalCubeSide+taskt*2; i++) {
+    mat basicCubeSlice = basicCube.slice(i);
+    internalCube.slice(i) = basicCubeSlice;
+  }
+  basicCube = internalCube;
 }
 
 int main(int argc, char *argv[]) {
@@ -144,57 +148,57 @@ int main(int argc, char *argv[]) {
   arma_rng::set_seed_random();
 
   int numParts = taskm;
-  int numPartsDimm = cbrt(taskm);
+  int numPartsDimm = round(cbrt(taskm));
 
   int basicCubeNum = taskN;
-  int basicCubeSide = cbrt(basicCubeNum);
+  int basicCubeSide = round(cbrt(basicCubeNum)); // cout points
 
   int internalCubeSide = basicCubeSide - 2*taskt;
   int internalCubeNum = pow(internalCubeSide, 3);
 
-  int internalSubCubeSide = (basicCubeSide - 2*taskt)/numPartsDimm;
+  int internalSubCubeSide = internalCubeSide/numPartsDimm;
   int internalSubCubeNum = pow(internalSubCubeSide, 3);
 
-  int nodeCubeSide = (internalCubeSide/numPartsDimm) + 2*taskt;
+  int nodeCubeSide = internalSubCubeSide + 2*taskt;
   int nodeCubeNum = pow(nodeCubeSide, 3);
 
-  cube nodeCube(nodeCubeSide, nodeCubeSide, nodeCubeSide);
   cube basicCube(basicCubeSide, basicCubeSide, basicCubeSide);
-  double* arraySendCubes;
-  double* arrayRecvCubes;
-  vector<cube> subCubes;
 
-  if (id == 0) {
-    // basicCube = randu<cube>(basicCubeSide, basicCubeSide, basicCubeSide);
-    int num = 0;
-    for (int i=0; i<basicCubeNum; i++) {
-      basicCube[i] = num;
-      num++;
-    }
-    arraySendCubes = splitIntoSubcubes(basicCube, numParts, internalCubeSide, numPartsDimm);
-  }
-  MPI_Scatter( arraySendCubes, nodeCubeNum, MPI_DOUBLE, nodeCube.begin(), nodeCubeNum, MPI_DOUBLE, 0, comm );
   if (id==0) {
-    delete [] arraySendCubes;
-    arraySendCubes = NULL;
-    arrayRecvCubes = (double *) malloc(pow(internalCubeSide, 3)*sizeof(double));
-  }
-  updateParametetsValue(nodeCube, nodeCubeNum);
-
-  // for (int i=0; i<100000; i++) {
-  //   updateParametetsValue(nodeCube, nodeCubeNum);
-  // }
-
-  cube internalSubCube = extractInternalPart(nodeCube, internalSubCubeSide);
-
-  MPI_Gather( internalSubCube.begin(), internalSubCubeNum, MPI_DOUBLE, arrayRecvCubes, internalSubCubeNum, MPI_DOUBLE, 0, comm );
-
-  if (id == 0) {
+    basicCube.load("input.txt");
     // basicCube = randu<cube>(basicCubeSide, basicCubeSide, basicCubeSide);
-    cube internalCube = combineSubcubes(arrayRecvCubes, numParts, numPartsDimm, internalSubCubeSide, internalCubeSide, internalSubCubeNum);
-    updateInternalPart(basicCube, internalCube, internalCubeSide);
   }
+  double start = MPI_Wtime();
+  for (int i=0; i<100; i++) {
+    cube nodeCube(nodeCubeSide, nodeCubeSide, nodeCubeSide);
+    double* arraySendCubes;
+    double* arrayRecvCubes;
+    vector<cube> subCubes;
+    if (id == 0) {
+      arraySendCubes = splitIntoSubcubes(basicCube, numParts, internalCubeSide, numPartsDimm, nodeCubeNum);
+    }
+    MPI_Scatter( arraySendCubes, nodeCubeNum, MPI_DOUBLE, nodeCube.begin(), nodeCubeNum, MPI_DOUBLE, 0, comm );
 
+    if (id==0) {
+      delete [] arraySendCubes;
+      arraySendCubes = NULL;
+      arrayRecvCubes = (double *) malloc(numParts*nodeCubeNum*sizeof(double));
+    }
+    updateParametetsValue(nodeCube, nodeCubeNum, nodeCubeSide);
+    cube internalSubCube = extractInternalPart(nodeCube, internalSubCubeSide, id);
+
+    MPI_Gather( internalSubCube.begin(), internalSubCubeNum, MPI_DOUBLE, arrayRecvCubes, internalSubCubeNum, MPI_DOUBLE, 0, comm );
+
+    if (id == 0) {
+      cube internalCube = combineSubcubes(arrayRecvCubes, numParts, numPartsDimm, internalSubCubeSide, internalCubeSide, internalSubCubeNum);
+      updateInternalPart(basicCube, internalCube, internalCubeSide);
+      delete [] arrayRecvCubes;
+      arrayRecvCubes = NULL;
+    }
+  }
+  double end = MPI_Wtime();
+  if (id==0) cout << "The process 0 took " << end - start << " seconds to run." << endl;
+  basicCube.save("result.txt", arma_ascii);
   MPI_Finalize();
   return 0;
 }
