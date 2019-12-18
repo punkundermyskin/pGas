@@ -3,18 +3,29 @@
 #include <cmath>
 #include "mpi.h"
 #include <stdio.h>
+
 #include <vector>
+
 #include <random>
 #include <ctime>
+
+#include <unistd.h>
+#include <fstream>
+#include <bits/stdc++.h>
+#include <math.h>
 
 using namespace std;
 using namespace arma;
 
 int taskP; // p - processors count
-int taskN = 729000; // n - number of cells
+int taskN; // n - number of cells
 int taskm; // m - number of blocks
-int taskK = 1; // K - number of parameters
-int taskt = 15; // t - shadow area size
+int taskK; // K - number of parameters
+int taskt; // t - shadow area size
+int taskI;
+bool testMode = true;
+vector<string> inputFilesPaths;
+vector<string> outputFilesPaths;
 
 double* splitIntoSubcubes (cube basicCube, int numParts, int internalCubeSide, int numPartsDimm, int nodeCubeNum) {
   double* subCubes;
@@ -132,25 +143,111 @@ void updateInternalPart(cube &basicCube, cube &internalCube, int internalCubeSid
   basicCube = internalCube;
 }
 
+bool is_digits(const std::string &str) {
+    return str.find_first_not_of("0123456789. -e") == std::string::npos;
+}
+
+void findInputError(string path) {
+  std::ifstream file(path);
+  if (file.is_open() == false) cerr << "File " << path << " can't be opened!" << endl;
+  else {
+    std::string str;
+    int num = 0;
+    while (std::getline(file, str)) {
+      if (num==0 && str != "ARMA_CUB_TXT_FN008") cerr << path << ":" << num << " - wrong line !" << endl;
+      if (is_digits(str) == false) cerr << path << ":" << num << " - wrong line !" << endl;
+      num++;
+    }
+  }
+}
+
+vector<string> splitFilePaths(string str) {
+  vector<string> filePaths;
+  string path = "";
+  for (auto x : str) {
+      if (x == ' ') {
+          filePaths.push_back(path);
+          path = "";
+      } else path = path + x;
+  }
+  filePaths.push_back(path);
+  return filePaths;
+}
+
+int parserRun(int argc, char *argv[]) {
+  int opt;
+  if ((argc < 10) || (argc > 13)) {
+      cerr << "Wrong arguments number!" << endl;
+      return 1;
+  }
+  opterr = 0;
+
+  while ( (opt = getopt(argc, argv, "n:k:t:i:f:o:e")) != -1 ) {
+    switch ( opt ) {
+      case 'n':
+        taskN = atoi(optarg);
+        if (taskN == 0) {
+          std::cerr << "error in parameter: -n" << endl;
+          return 1;
+        }
+        break;
+      case 'k':
+        taskK = atoi(optarg);
+        if (taskK == 0) {
+          std::cerr << "error in parameter: -k"  << endl;
+          return 1;
+        }
+        break;
+      case 't':
+        taskt = atoi(optarg);
+        if (taskt == 0) {
+          std::cerr << "error in parameter: -t" << endl;
+          return 1;
+        }
+        break;
+      case 'i':
+        taskI = atoi(optarg);
+        if (taskI == 0) {
+          std::cerr << "error in parameter: -i"  << endl;
+          return 1;
+        }
+        break;
+      case 'e':
+        testMode = false;
+        break;
+      case 'f':
+        if (testMode == true) {
+          inputFilesPaths = splitFilePaths(optarg);
+        } else break;
+      case 'o':
+        if (testMode == true) {
+          outputFilesPaths = splitFilePaths(optarg);
+        } else break;
+      case '?':
+        if (optopt != 0) cerr << "Unknown option: '" << char(optopt) << "'!" << endl;
+        break;
+      }
+  }
+  return 0;
+  // To-Do check values!
+}
+
 int main(int argc, char *argv[]) {
   int id, worldSize;
   MPI_Init(&argc,&argv);
+  if (parserRun(argc, argv) == 1) MPI_Abort(MPI_COMM_WORLD, 1);
   MPI_Comm comm = MPI_COMM_WORLD;
   MPI_Comm_rank(comm, &id);
   MPI_Comm_size(MPI_COMM_WORLD, &worldSize);
-  taskm = worldSize;
-  char processor_name[MPI_MAX_PROCESSOR_NAME];
-  int name_len;
-  MPI_Get_processor_name(processor_name, &name_len);
   srand(time(NULL) + id);
 
   // Initialize the random generator
   arma_rng::set_seed_random();
 
-  int numParts = taskm;
-  int numPartsDimm = round(cbrt(taskm));
+  int numParts = worldSize;
+  int numPartsDimm = round(cbrt(worldSize));
 
-  int basicCubeNum = taskN;
+  int basicCubeNum = taskN/taskK;
   int basicCubeSide = round(cbrt(basicCubeNum)); // cout points
 
   int internalCubeSide = basicCubeSide - 2*taskt;
@@ -162,43 +259,73 @@ int main(int argc, char *argv[]) {
   int nodeCubeSide = internalSubCubeSide + 2*taskt;
   int nodeCubeNum = pow(nodeCubeSide, 3);
 
+  checkInputParameters();
+  vector<cube> basicCubes;
   cube basicCube(basicCubeSide, basicCubeSide, basicCubeSide);
 
+  // load input data
   if (id==0) {
-    basicCube.load("input.txt");
-    // basicCube = randu<cube>(basicCubeSide, basicCubeSide, basicCubeSide);
+    if (testMode==false) {
+      for (int i=0; i<taskK; i++) basicCubes.push_back(randu<cube>(basicCubeSide, basicCubeSide, basicCubeSide));
+    } else {
+      for (int i=0; i<taskK; i++) {
+        string path = inputFilesPaths[i];
+        basicCube.load(path);
+        if (basicCube.is_empty()) {
+          findInputError(path);
+          MPI_Abort(MPI_COMM_WORLD, 1);
+        } else if (basicCube.size() != basicCubeNum) cerr << path << ": Wrong cube size" << endl;
+        basicCubes.push_back(basicCube);
+      }
+    }
   }
+
   double start = MPI_Wtime();
-  for (int i=0; i<100; i++) {
-    cube nodeCube(nodeCubeSide, nodeCubeSide, nodeCubeSide);
-    double* arraySendCubes;
-    double* arrayRecvCubes;
-    vector<cube> subCubes;
-    if (id == 0) {
-      arraySendCubes = splitIntoSubcubes(basicCube, numParts, internalCubeSide, numPartsDimm, nodeCubeNum);
-    }
-    MPI_Scatter( arraySendCubes, nodeCubeNum, MPI_DOUBLE, nodeCube.begin(), nodeCubeNum, MPI_DOUBLE, 0, comm );
 
-    if (id==0) {
-      delete [] arraySendCubes;
-      arraySendCubes = NULL;
-      arrayRecvCubes = (double *) malloc(numParts*nodeCubeNum*sizeof(double));
-    }
-    updateParametetsValue(nodeCube, nodeCubeNum, nodeCubeSide);
-    cube internalSubCube = extractInternalPart(nodeCube, internalSubCubeSide, id);
+  for (int i=0; i<taskK; i++) {
+    if (id==0) basicCube = basicCubes[i];
+    for (int i=0; i<taskI; i++) {
+      if (worldSize==1) updateParametetsValue(basicCube, basicCubeNum, basicCubeSide);
+      else {
+        cube nodeCube(nodeCubeSide, nodeCubeSide, nodeCubeSide);
+        double* arraySendCubes;
+        double* arrayRecvCubes;
+        vector<cube> subCubes;
+        if (id == 0) {
+          arraySendCubes = splitIntoSubcubes(basicCube, numParts, internalCubeSide, numPartsDimm, nodeCubeNum);
+        }
+        MPI_Scatter( arraySendCubes, nodeCubeNum, MPI_DOUBLE, nodeCube.begin(), nodeCubeNum, MPI_DOUBLE, 0, comm );
+        if (id==0) {
+          delete [] arraySendCubes;
+          arraySendCubes = NULL;
+          arrayRecvCubes = (double *) malloc(numParts*nodeCubeNum*sizeof(double));
+        }
+        updateParametetsValue(nodeCube, nodeCubeNum, nodeCubeSide);
+        cube internalSubCube = extractInternalPart(nodeCube, internalSubCubeSide, id);
+        MPI_Gather( internalSubCube.begin(), internalSubCubeNum, MPI_DOUBLE, arrayRecvCubes, internalSubCubeNum, MPI_DOUBLE, 0, comm );
 
-    MPI_Gather( internalSubCube.begin(), internalSubCubeNum, MPI_DOUBLE, arrayRecvCubes, internalSubCubeNum, MPI_DOUBLE, 0, comm );
-
-    if (id == 0) {
-      cube internalCube = combineSubcubes(arrayRecvCubes, numParts, numPartsDimm, internalSubCubeSide, internalCubeSide, internalSubCubeNum);
-      updateInternalPart(basicCube, internalCube, internalCubeSide);
-      delete [] arrayRecvCubes;
-      arrayRecvCubes = NULL;
+        if (id == 0) {
+          cube internalCube = combineSubcubes(arrayRecvCubes, numParts, numPartsDimm, internalSubCubeSide, internalCubeSide, internalSubCubeNum);
+          updateInternalPart(basicCube, internalCube, internalCubeSide);
+          delete [] arrayRecvCubes;
+          arrayRecvCubes = NULL;
+        }
+      }
     }
+    if (id==0) basicCubes[i] = basicCube;
   }
+
   double end = MPI_Wtime();
-  if (id==0) cout << "The process 0 took " << end - start << " seconds to run." << endl;
-  basicCube.save("result.txt", arma_ascii);
+  if (id==0) {
+    if (testMode == true) {
+      for (int i=0; i<taskK; i++) {
+        string path = outputFilesPaths[i];
+        basicCubes[i].save(path, arma_ascii);
+      }
+    } else
+    cout << "The process 0 took " << end - start << " seconds to run." << endl;
+  }
+
   MPI_Finalize();
   return 0;
 }
